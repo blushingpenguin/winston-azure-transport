@@ -317,8 +317,19 @@ export class AzureBlobTransport extends TransportStream {
             const blocks = chunk(lines, blockSize);
             const blobName = this.getBlobName();
 
-            async.eachSeries(blocks, (block: string, blockDone: () => void) =>
-                this.writeBlock(blobName, block, blockDone));
+            const completeTasks = (err: Error) => {
+                for (const task of tasks) {
+                    if (task.callback) {
+                        task.callback();
+                    }
+                }
+                completed();
+            }
+
+            const writeBlock = (block: string, blockDone: () => void) =>
+                this.writeBlock(blobName, block, blockDone);
+
+            async.eachSeries(blocks, writeBlock, completeTasks);
         });
     }
 }
