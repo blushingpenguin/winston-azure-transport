@@ -12,6 +12,7 @@
 buildClient
 buildServer
 tools/
+lib/
 
 # misc
 .DS_Store
