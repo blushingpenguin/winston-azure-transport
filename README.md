@@ -1,4 +1,4 @@
-# winston-azure-blob-transport
+# winston-azure-transport
 
 [![NPM version](https://badge.fury.io/js/winston-azure-transport.png)](http://badge.fury.io/js/winston-azure-transport)
 
