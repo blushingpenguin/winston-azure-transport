@@ -19,6 +19,7 @@ interface ICleanState {
     entries: string[]
 }
 
+export const DEFAULT_NAME_FORMAT = "{yyyy}/{MM}/{dd}/{hh}/node.log";
 const MS_IN_DAY = 24 * 60 * 60 * 1000;
 
 export class AzureBlobTransport extends TransportStream {
@@ -41,7 +42,7 @@ export class AzureBlobTransport extends TransportStream {
         this.trace = opts.trace === true;
         this.buildCargo();
         this.createSas(opts.containerUrl);
-        this.nameFormat = opts.nameFormat || "{yyyy}/{MM}/{dd}/{hh}/node.log",
+        this.nameFormat = opts.nameFormat || DEFAULT_NAME_FORMAT,
         this.retention = opts.retention;
 
         if (this.retention) {
