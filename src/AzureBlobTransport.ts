@@ -1,6 +1,7 @@
 import async, { AsyncCargo } from "async";
 import azure, { ServiceResponse, StorageError } from "azure-storage";
 import chunk from "chunk";
+import { URL } from 'url';
 import { TransformableInfo } from "logform";
 import { MESSAGE } from "triple-beam";
 import TransportStream from "winston-transport";

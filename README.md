@@ -97,6 +97,7 @@ const logger = winston.createLogger({
             containerUrl: "https://mystorage.blob.core.windows.net/errors?sv=2018-03-28&sr=c&sig=x&st=2019-01-01T00:00:00Z&se=2219-01-01T00:00:00Z&sp=rwdl",
             nameFormat: "my-app-logs/{yyyy}/{MM}/{dd}/{hh}/node.log",
             retention: 365
+        })
     ]
 });
 logger.log("info", "Hello, world!");
