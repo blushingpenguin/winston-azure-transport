@@ -96,7 +96,9 @@ const logger = winston.createLogger({
         new AzureBlobTransport({
             containerUrl: "https://mystorage.blob.core.windows.net/errors?sv=2018-03-28&sr=c&sig=x&st=2019-01-01T00:00:00Z&se=2219-01-01T00:00:00Z&sp=rwdl",
             nameFormat: "my-app-logs/{yyyy}/{MM}/{dd}/{hh}/node.log",
+            syncDelay: 1000,
             retention: 365
+        })
     ]
 });
 logger.log("info", "Hello, world!");
@@ -117,6 +119,13 @@ The name of the logger within winston (defaults to AzureBlobTransport).
 
 #### nameFormat
 The name format can be omitted and defaults to "{yyyy}/{MM}/{dd}/{hh}/node.log".
+
+#### syncDelay
+Sends logs to the blob container at most every `syncDelay` milliseconds.
+
+Azure append blobs [support at most 50,000 blocks][5] stored in a blob. If more than that amount of writes are performed between log file rotation, the remaining logs are lost.
+
+The default value is 1000 ms, that is a maximum of 3,600 blocks per hour per instance. To send all logs immediately, set to zero.
 
 #### retention
 The number of days to keep logs for. Log dates will be parsed according to the nameFormat option, and any logs older than the specified number of days will be deleted once per day.
@@ -156,3 +165,4 @@ With appsettings.json being something like:
 [2]: https://github.com/Parsimotion/winston-azure-blob-transport/blob/master/README.md
 [3]: https://www.npmjs.com/package/express-winston
 [4]: https://www.npmjs.com/package/express
+[5]: https://docs.microsoft.com/en-us/rest/api/storageservices/understanding-block-blobs--append-blobs--and-page-blobs#about-append-blobs
