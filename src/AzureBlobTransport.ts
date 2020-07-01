@@ -312,7 +312,8 @@ export class AzureBlobTransport extends TransportStream {
             this.debug(`logging ${tasks.length} line${tasks.length > 1 ? "s" : ""}`);
             const lines = tasks.reduce((pv, v) => pv + v.line + "\n", "");
             // The cast is because the typescript typings are wrong
-            const blockSize = (azure.Constants.BlobConstants as any).MAX_APPEND_BLOB_BLOCK_SIZE;
+            // UTF-8 chars can be 4 bytes so divide by 4
+            const blockSize = (azure.Constants.BlobConstants as any).MAX_APPEND_BLOB_BLOCK_SIZE / 4;
             const blocks = this.chunk(lines, blockSize);
             const blobName = this.getBlobName();
 
