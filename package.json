@@ -61,6 +61,6 @@
   "homepage": "https://github.com/blushingpenguin/winston-azure-transport#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/blushingpenguin/winston-azure-blob-transport.git"
+    "url": "https://github.com/blushingpenguin/winston-azure-transport.git"
   }
 }
