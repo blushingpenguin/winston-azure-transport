@@ -98,15 +98,15 @@ export class AzureBlobTransport extends TransportStream {
         const m = "" + now.getMinutes();
 
         const name = this.nameFormat
-            .replace("{yyyy}", "" + now.getFullYear())
-            .replace("{MM}", M.padStart(2, "0"))
-            .replace("{M}", M)
-            .replace("{dd}", d.padStart(2, "0"))
-            .replace("{d}", d)
-            .replace("{hh}", h.padStart(2, "0"))
-            .replace("{h}", h)
-            .replace("{mm}", m.padStart(2, "0"))
-            .replace("{m}", m);
+            .replace(/\{yyyy\}/g, "" + now.getFullYear())
+            .replace(/\{MM\}/g, M.padStart(2, "0"))
+            .replace(/\{M\}/g, M)
+            .replace(/\{dd\}/g, d.padStart(2, "0"))
+            .replace(/\{d\}/g, d)
+            .replace(/\{hh\}/g, h.padStart(2, "0"))
+            .replace(/\{h\}/g, h)
+            .replace(/\{mm\}/g, m.padStart(2, "0"))
+            .replace(/\{m\}/g, m);
         this.debug(`using log name ${name} based on format ${this.nameFormat}`);
         return name;
     }
