@@ -1,6 +1,5 @@
 import async, { AsyncCargo } from "async";
 import azure, { ServiceResponse, StorageError } from "azure-storage";
-import chunk from "chunk";
 import { TransformableInfo } from "logform";
 import { MESSAGE } from "triple-beam";
 import TransportStream from "winston-transport";
@@ -314,7 +313,7 @@ export class AzureBlobTransport extends TransportStream {
             const lines = tasks.reduce((pv, v) => pv + v.line + "\n", "");
             // The cast is because the typescript typings are wrong
             const blockSize = (azure.Constants.BlobConstants as any).MAX_APPEND_BLOB_BLOCK_SIZE;
-            const blocks = chunk(lines, blockSize);
+            const blocks = this.chunk(lines, blockSize);
             const blobName = this.getBlobName();
 
             const completeTasks = (err: Error) => {
@@ -332,4 +331,13 @@ export class AzureBlobTransport extends TransportStream {
             async.eachSeries(blocks, writeBlock, completeTasks);
         });
     }
+
+    private chunk(str: string, size: number) {
+        const numChunks = Math.ceil(str.length / size);
+        const chunks = new Array(numChunks);
+        for (let i = 0, o = 0; i < numChunks; ++i, o += size) {
+          chunks[i] = str.substr(o, size);
+        }
+        return chunks;
+      }
 }
