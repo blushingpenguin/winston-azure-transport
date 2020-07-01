@@ -9,6 +9,7 @@ export interface IAzureBlobTransportOptions extends TransportStream.TransportStr
     containerUrl: string
     name?: string
     nameFormat?: string
+    syncDelay?: number
     retention?: number
     trace?: boolean
 }
@@ -20,11 +21,13 @@ interface ICleanState {
 }
 
 export const DEFAULT_NAME_FORMAT = "{yyyy}/{MM}/{dd}/{hh}/node.log";
+export const DEFAULT_SYNC_DELAY = 1000;
 const MS_IN_DAY = 24 * 60 * 60 * 1000;
 
 export class AzureBlobTransport extends TransportStream {
     public name: string
     private trace: boolean
+    private syncDelay: number
     private cargo: AsyncCargo
     private containerName: string
     private nameFormat: string
@@ -40,6 +43,7 @@ export class AzureBlobTransport extends TransportStream {
 
         this.name = opts.name || "AzureBlobTransport";
         this.trace = opts.trace === true;
+        this.syncDelay = opts.syncDelay == undefined ? DEFAULT_SYNC_DELAY : opts.syncDelay;
         this.buildCargo();
         this.createSas(opts.containerUrl);
         this.nameFormat = opts.nameFormat || DEFAULT_NAME_FORMAT,
@@ -310,6 +314,7 @@ export class AzureBlobTransport extends TransportStream {
 
     private buildCargo() {
         this.cargo = async.cargo((tasks: any[], completed: async.ErrorCallback<Error>) => {
+            const t0 = Date.now();
             this.debug(`logging ${tasks.length} line${tasks.length > 1 ? "s" : ""}`);
             const lines = tasks.reduce((pv, v) => pv + v.line + "\n", "");
             // The cast is because the typescript typings are wrong
@@ -325,11 +330,20 @@ export class AzureBlobTransport extends TransportStream {
                 }
                 completed();
             }
+            const completeTasksDelayed = (err: Error) => {
+                const spentTime = Math.max(Date.now() - t0, 0);
+                const delay = this.syncDelay - spentTime;
+                if (delay > 0) {
+                    setTimeout(() => completeTasks(err), delay);
+                } else {
+                    completeTasks(err);
+                }
+            }
 
             const writeBlock = (block: string, blockDone: () => void) =>
                 this.writeBlock(blobName, block, blockDone);
 
-            async.eachSeries(blocks, writeBlock, completeTasks);
+            async.eachSeries(blocks, writeBlock, completeTasksDelayed);
         });
     }
 }
