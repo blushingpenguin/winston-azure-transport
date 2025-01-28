@@ -2,12 +2,12 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": { "*" : ["@types/*"] },
-    "outDir": "lib",
+    "outDir": "dist",
     "declaration": true,
-    "module": "commonjs",
-    "target": "esnext",
+    "module": "es2022",
+    "target": "es2022",
     "downlevelIteration": true,
-    "lib": ["dom", "es2017", "es2017.string"],
+    "lib": ["dom", "es2022"],
     "sourceMap": true,
     "jsx": "react",
     "moduleResolution": "node",
@@ -16,7 +16,6 @@
     "noImplicitThis": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
-    "suppressImplicitAnyIndexErrors": true,
     "noUnusedLocals": true,
     "typeRoots": ["./@types", "./node_modules/@types"],
     "esModuleInterop": true,
@@ -30,7 +29,8 @@
     "webpack",
     "jest",
     "src/setupTests.ts",
-    "dist"
+    "dist",
+    "test"
   ],
   "include": [
     "src",

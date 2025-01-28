@@ -1,35 +1,50 @@
-import async, { AsyncCargo } from "async";
-import azure, { ServiceResponse, StorageError } from "azure-storage";
-import chunk from "chunk";
-import { TransformableInfo } from "logform";
+import { cargo } from "async";
 import { MESSAGE } from "triple-beam";
 import TransportStream from "winston-transport";
 
+import { ClientSecretCredential, DefaultAzureCredential } from "@azure/identity";
+import { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
+
+import { AsyncLock } from "./asyncLock";
+import { AzureLogger } from "./AzureLogger";
+
+import type { QueueObject } from "async";
+import type { LogEntry } from "winston";
 export interface IAzureBlobTransportOptions extends TransportStream.TransportStreamOptions {
     containerUrl: string
     name?: string
     nameFormat?: string
     retention?: number
     trace?: boolean
-}
-
-interface ICleanState {
-    prefix: string
-    now: number
-    entries: string[]
+    clientId?: string
+    clientSecret?: string
+    tenantId?: string
+    flushTimeout?: number
 }
 
 export const DEFAULT_NAME_FORMAT = "{yyyy}/{MM}/{dd}/{hh}/node.log";
 const MS_IN_DAY = 24 * 60 * 60 * 1000;
+const DEFAULT_FLUSH_TIMEOUT = 5; // minutes
+
+interface IQueuedLogMessage {
+    line: string
+    callback?: () => void
+}
 
 export class AzureBlobTransport extends TransportStream {
     public name: string
     private trace: boolean
-    private cargo: AsyncCargo
+    private cargo: QueueObject<IQueuedLogMessage>
     private containerName: string
     private nameFormat: string
     private retention?: number
-    private blobService: azure.BlobService
+    private blobServiceClient: BlobServiceClient
+    private containerClient: ContainerClient
+    private loggerLock: AsyncLock
+    private activeLogger?: AzureLogger
+    private activeLoggerName?: string
+    private flushTimeout: number
+    private flushTimeoutHandle: NodeJS.Timeout | undefined
 
     constructor(opts: IAzureBlobTransportOptions) {
         super(opts);
@@ -39,11 +54,36 @@ export class AzureBlobTransport extends TransportStream {
         }
 
         this.name = opts.name || "AzureBlobTransport";
+        this.loggerLock = new AsyncLock();
         this.trace = opts.trace === true;
         this.buildCargo();
-        this.createSas(opts.containerUrl);
         this.nameFormat = opts.nameFormat || DEFAULT_NAME_FORMAT,
         this.retention = opts.retention;
+        this.flushTimeout = (opts.flushTimeout || DEFAULT_FLUSH_TIMEOUT) * 60 * 1000;
+        this.flushTimeoutHandle = setTimeout(() => void this.flushOnInterval(), this.flushTimeout);
+
+        const url = new URL(opts.containerUrl);
+        let sas = url.search;
+
+        this.containerName = url.pathname;
+        if (this.containerName.startsWith("/")) {
+            this.containerName = this.containerName.substr(1);
+        }
+
+        if (sas.startsWith("?")) {
+            sas = sas.substring(1);
+            this.debug(`create SAS for ${url.protocol}//${url.host}, sasToken=${sas}`);
+            this.blobServiceClient = new BlobServiceClient(`${url.protocol}//${url.host}${sas}`);
+        } else {
+            let credential;
+            if (opts.clientId && opts.clientSecret && opts.tenantId) {
+                credential = new ClientSecretCredential(opts.tenantId, opts.clientId, opts.clientSecret)
+            } else {
+                credential = new DefaultAzureCredential();
+            }
+            this.blobServiceClient = new BlobServiceClient(`${url.protocol}//${url.host}`, credential);
+        }
+        this.containerClient = this.blobServiceClient.getContainerClient(this.containerName);
 
         if (this.retention) {
             setTimeout(this.cleanOldLogs, 1);
@@ -56,37 +96,32 @@ export class AzureBlobTransport extends TransportStream {
         }
     }
 
-    private createSas(containerUrl: string) {
-        const url = new URL(containerUrl);
-
-        let sas = url.search;
-        if (sas.startsWith("?")) {
-            sas = sas.substr(1);
-        }
-
-        this.debug(`create SAS for ${url.protocol}//${url.host}, sasToken=${sas}`);
-        this.blobService = azure.createBlobServiceWithSas(
-            `${url.protocol}//${url.host}`,
-            sas);
-        this.containerName = url.pathname;
-        if (this.containerName.startsWith("/")) {
-            this.containerName = this.containerName.substr(1);
-        }
-
-        // console.log(`create blob container ${url.protocol}//${url.host}/${this.containerName}`);
-        // this.blobService.createContainerIfNotExists(this.containerName, (error, result, response) => {
-        //     if (error) {
-        //         console.error(`creating the blob container ${this.containerName} ` +
-        //             `failed with ${JSON.stringify(error, null, 2)}`);
-        //     }
-        // });
-    }
-
-    public log(info: TransformableInfo, callback: () => void) {
+    public log(entry: LogEntry, callback: () => void) {
         this.cargo.push({
-            line: info[MESSAGE],
+            line: (entry as any)[MESSAGE],
             callback
         });
+        this.emit('logged', entry);
+    }
+
+    public async closeAsync(cb?: () => void) {
+        if (this.flushTimeoutHandle) {
+            clearTimeout(this.flushTimeoutHandle);
+            this.flushTimeoutHandle = undefined;
+        }
+        if (this.activeLogger) {
+            this.debug(`flushing active logger on close`);
+            await this.loggerLock.runLocked(() => this.activeLogger!.flush());
+            this.debug(`flushed active logger on close`);
+        }
+        cb?.();
+        this.emit('flush');
+        this.emit('closed');
+    }
+
+    public close(cb?: () => void) {
+        this.debug(`closing azure logger`);
+        void this.closeAsync(cb);
     }
 
     private getBlobName() {
@@ -107,7 +142,6 @@ export class AzureBlobTransport extends TransportStream {
             .replace("{h}", h)
             .replace("{mm}", m.padStart(2, "0"))
             .replace("{m}", m);
-        this.debug(`using log name ${name} based on format ${this.nameFormat}`);
         return name;
     }
 
@@ -181,64 +215,45 @@ export class AzureBlobTransport extends TransportStream {
         return new Date(y, M - 1, d, h, m).getTime();
     }
 
-    private listBlobsCallback(
-        state: ICleanState,
-        error: StorageError,
-        result: azure.BlobService.ListBlobDirectoriesResult,
-        response: ServiceResponse
-    ) {
-        if (error) {
-            console.error(`listing storage blobs failed with ${JSON.stringify(error, null, 2)}`);
-            return;
-        }
-
+    private async tryCleanOldLogs(now: number, prefix: string) {
+        const toDelete : string[] = [];
         const retention = this.retention! * MS_IN_DAY;
 
-        for (const entry of result.entries) {
-            const timestamp = this.parseName(entry.name);
-            if (timestamp > 0) {
-                this.debug(`parsed name ${entry.name} giving timestamp ${new Date(timestamp).toISOString()}` +
-                    ` (ms = ${timestamp}, retention = ${retention},` +
-                    ` expires = ${timestamp + retention}, now = ${state.now})`);
+        for await (const response of this.containerClient.listBlobsFlat({ prefix }).byPage()) {
+            if (response.segment.blobItems) {
+                for (const blob of response.segment.blobItems) {
+                    const timestamp = this.parseName(blob.name);
+                    if (timestamp > 0) {
+                        this.debug(`parsed name ${blob.name} giving timestamp ${new Date(timestamp).toISOString()}` +
+                            ` (ms = ${timestamp}, retention = ${retention},` +
+                            ` expires = ${timestamp + retention}, now = ${now})`);
+                    }
+                    if (timestamp + retention < now) {
+                        this.debug(`clean old blob ${blob.name}`);
+                        toDelete.push(blob.name);
+                    }
+                }
             }
-            if (timestamp + retention < state.now) {
-                this.debug(`clean old blob ${entry.name}`);
-                state.entries.push(entry.name);
+        }
+
+        for (const name of toDelete) {
+            this.debug(`deleting old log ${name}`);
+            try {
+                await this.containerClient.deleteBlob(name);
             }
-        }
-
-        if (result.continuationToken) {
-            this.listBlobs(state, result.continuationToken);
-        } else {
-            this.listBlobsComplete(state);
-        }
-    }
-
-    private listBlobs(state: ICleanState, token: azure.common.ContinuationToken | null) {
-        this.blobService.listBlobsSegmentedWithPrefix(this.containerName, state.prefix, token!,
-            (err: StorageError, res: azure.BlobService.ListBlobDirectoriesResult,
-             resp: ServiceResponse) =>
-                this.listBlobsCallback(state, err, res, resp));
-    }
-
-    private deleteBlobComplete(name: string, err: StorageError, result: boolean) {
-        if (err) {
-            console.error(`deleting old log {name} failed with ${JSON.stringify(err, null, 2)}`);
-        } else {
-            this.debug(`deleting old log ${name} ${result ? "succeeded" : "failed"}`);
-        }
-    }
-
-    private listBlobsComplete(state: ICleanState) {
-        for (const entry of state.entries) {
-            this.debug(`deleting old log ${entry}`);
-            this.blobService.deleteBlobIfExists(this.containerName, entry,
-                (err: StorageError, result: boolean) =>
-                    this.deleteBlobComplete(entry, err, result));
+            catch (error) {
+                if (!(error.statusCode === 404 && error.code === "BlobNotFound")) {
+                    console.error(`deleted the blob ${name} failed with ${JSON.stringify(error, null, 2)}`);
+                }
+            }
         }
     }
 
     private cleanOldLogs = () => {
+        void this.cleanOldLogsAsync();
+    }
+
+    private async cleanOldLogsAsync() {
         // only once per day
         const now = Date.now();
         if (this.nextClean && now < this.nextClean) {
@@ -257,79 +272,71 @@ export class AzureBlobTransport extends TransportStream {
             return;
         }
         const prefix = this.nameFormat.substr(0, prefixIndex);
-        this.listBlobs({ now, prefix, entries: [] }, null);
+        try {
+            await this.tryCleanOldLogs(now, prefix);
+        }
+        catch (error) {
+            console.error(`Failed to clean old azure logs: ${JSON.stringify(error, null, 2)}`);
+        }
 
         setTimeout(this.cleanOldLogs, this.nextClean - now);
         this.debug(`next clean at ${new Date(this.nextClean)}, `+
             `retention is ${this.retention} day${this.retention! > 1 ? "s" : ""}`);
     }
 
-    private createBlockComplete(err: azure.StorageError, blobName: string, blockDone: () => void) {
-        if (err) {
-            console.error(`BlobService.createAppendBlobFromText(` +
-                `${this.containerName}/${blobName}) failed with = ` +
-                `${JSON.stringify(err,null,2)}`);
-        }
-        blockDone();
-    }
-
-    private writeBlockComplete(err: azure.StorageError, blobName: string,
-        block: string, blockDone: () => void) {
-        if (err) {
-            if (err.code === "BlobNotFound") {
-                // The cast here is because the docs differ from the typescript
-                // bindings (there are other TS bugs, so go with the docs)
-                const blobRequestOptions = {
-                    absorbConditionalErrorsOnRetry: true
-                } as azure.BlobService.CreateBlobRequestOptions;
-
-                this.debug(`creating new blob ${this.containerName}/${blobName}`);
-                this.blobService.createAppendBlobFromText(
-                    this.containerName, blobName, block, blobRequestOptions,
-                    (cerr: azure.StorageError) =>
-                        this.createBlockComplete(cerr, blobName, blockDone)
-                );
-                return;
+    private async flushOnInterval() {
+        this.debug("flushing on timeout");
+        this.flushTimeoutHandle = undefined;
+        await this.loggerLock.runLocked(async () => {
+            try {
+                if (this.activeLogger) {
+                    await this.activeLogger.flush();
+                }
             }
-            console.error(`BlobService.appendBlockFromText(` +
-                `${this.containerName}/${blobName}) failed with ` +
-                `error = ${JSON.stringify(err,null,2)}`);
-        }
-        blockDone();
+            catch (error) {
+                console.error(`Flushing the log failed with error = ${JSON.stringify(error, null, 2)}`);
+            }
+        });
+        this.flushTimeoutHandle = setTimeout(() => void this.flushOnInterval(), this.flushTimeout);
     }
 
-    private writeBlock(blobName: string, block: string, blockDone: () => void) {
-        this.debug(`writing block of size ${block.length} = ${block}`);
-        const blobRequestOptions = { absorbConditionalErrorsOnRetry: true };
-        this.blobService.appendBlockFromText(
-            this.containerName, blobName, block, blobRequestOptions,
-            (err: azure.StorageError) =>
-                this.writeBlockComplete(err, blobName, block, blockDone)
-        );
+    private async handleCargo(tasks: IQueuedLogMessage[], callback: () => void) {
+        await this.loggerLock.runLocked(async (tasks: IQueuedLogMessage[]) => {
+            const blobName = this.getBlobName();
+            if (this.activeLoggerName != blobName) {
+                if (this.activeLogger) {
+                    try {
+                        await this.activeLogger.flush();
+                    }
+                    catch (error) {
+                        console.error(`Flushing the logger for ${this.activeLoggerName} ` +
+                            `failed with error = ${JSON.stringify(error, null, 2)}`);
+                    }
+                }
+                const appendBlobClient = this.containerClient.getAppendBlobClient(blobName);
+                this.activeLoggerName = blobName;
+                this.activeLogger = new AzureLogger(appendBlobClient);
+            }
+
+            const lines = tasks.reduce((pv, v) => pv + v.line + "\n", "");
+            try {
+                await this.activeLogger?.append(lines);
+            }
+            catch (error) {
+                console.error(`Writing to the log ${this.activeLoggerName} ` +
+                    `failed with error = ${JSON.stringify(error, null, 2)}`);
+            }
+
+            for (const task of tasks) {
+                task.callback?.();
+            }
+        }, tasks)
+        callback();
     }
 
     private buildCargo() {
-        this.cargo = async.cargo((tasks: any[], completed: async.ErrorCallback<Error>) => {
-            this.debug(`logging ${tasks.length} line${tasks.length > 1 ? "s" : ""}`);
-            const lines = tasks.reduce((pv, v) => pv + v.line + "\n", "");
-            // The cast is because the typescript typings are wrong
-            const blockSize = (azure.Constants.BlobConstants as any).MAX_APPEND_BLOB_BLOCK_SIZE;
-            const blocks = chunk(lines, blockSize);
-            const blobName = this.getBlobName();
-
-            const completeTasks = (err: Error) => {
-                for (const task of tasks) {
-                    if (task.callback) {
-                        task.callback();
-                    }
-                }
-                completed();
-            }
-
-            const writeBlock = (block: string, blockDone: () => void) =>
-                this.writeBlock(blobName, block, blockDone);
-
-            async.eachSeries(blocks, writeBlock, completeTasks);
+        this.cargo = cargo((tasks: IQueuedLogMessage[], callback) => {
+            void this.handleCargo(tasks, callback);
         });
     }
 }
