@@ -1,7 +1,7 @@
 {
   "name": "winston-azure-transport",
   "description": "A winston transport for azure blobs",
-  "version": "3.0.4",
+  "version": "3.0.6",
   "private": false,
   "sideEffects": false,
   "type": "module",
